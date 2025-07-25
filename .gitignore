@@ -80,3 +80,90 @@ CMakeLists.txt.user*
 .rcc/
 .uic/
 /build*/
+
+# ============================================================================
+# ADDITIONAL IGNORES FOR TEXDIT PROJECT
+# ============================================================================
+
+# CMake Build Files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.ninja
+qtcsettings.cmake
+build.ninja
+
+# Qt Creator Additional Files
+*.creator.user*
+.qtc_clangd/
+
+# Python Backend Files
+__pycache__/
+*.py[cod]
+*$py.class
+backend/__pycache__/
+backend/*.pyc
+backend/venv/
+backend/env/
+backend/.venv/
+
+# Python Virtual Environments
+venv/
+env/
+ENV/
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.pytest_cache/
+
+# Python Package Files
+*.egg-info/
+dist/
+.eggs/
+
+# IDE Files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS Generated Files
+ehthumbs.db
+desktop.ini
+.Spotlight-V100
+.Trashes
+
+# Temporary Files
+*.tmp
+*.temp
+*.log
+*.bak
+*.backup
+
+# Large AI Model Files (uncomment if you want to exclude models)
+# models/*/
+# !models/.gitkeep
+
+# Testing Files
+Testing/
+*.test
+
+# Environment Variables
+.env
+.env.local
+.env.*.local
+
+# Cache directories
+.cache/
+cache/
+
+# Logs
+logs/
+
+# CMake Debug/Release specific
+cmake-build-*/
+
+# Editor backups
+*.rej
