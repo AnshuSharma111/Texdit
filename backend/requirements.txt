@@ -1,0 +1,17 @@
+# Texdit Backend Dependencies
+# AI and Machine Learning
+tensorflow>=2.8.0
+transformers>=4.20.0
+torch>=1.12.0
+sentencepiece>=0.1.96
+
+# Web Framework
+Flask>=2.0.0
+Flask-CORS>=3.0.10
+
+# Text Processing
+rapidfuzz>=2.0.0
+
+# Utilities
+requests>=2.25.0
+numpy>=1.21.0

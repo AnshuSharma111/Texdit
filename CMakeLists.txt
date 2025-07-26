@@ -17,15 +17,18 @@ set(PROJECT_SOURCES
         main.cpp
         mainwindow.cpp
         mainwindow.h
+        loadingscreen.cpp
+        loadingscreen.h
+        servermanager.cpp
+        servermanager.h
+        commandmanager.cpp
+        commandmanager.h
 )
 
 if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)
     qt_add_executable(texdit
         MANUAL_FINALIZATION
         ${PROJECT_SOURCES}
-
-        commandRegistry.cpp
-        commandRegistry.h
     )
 # Define target properties for Android with Qt 6 as:
 #    set_property(TARGET texdit APPEND PROPERTY QT_ANDROID_PACKAGE_SOURCE_DIR

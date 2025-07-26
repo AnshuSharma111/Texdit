@@ -34,6 +34,15 @@ def home():
         "endpoints": ["/api/search", "/api/summarise"]
     })
 
+@app.route('/health')
+def health():
+    """Health check endpoint for monitoring"""
+    return jsonify({
+        "status": "ok",
+        "message": "Server is healthy",
+        "model_loaded": model is not None
+    })
+
 @app.route('/api/search', methods=['POST'])
 def search():
     """Fuzzy search endpoint"""
@@ -129,5 +138,144 @@ def summarise():
         logger.error(f"Error occurred in /api/summarise: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
+@app.route('/api/keywords', methods=["POST"])
+def keywords():
+    """Extract keywords endpoint"""
+    try:
+        data = request.get_json()
+        
+        if not data or 'text' not in data:
+            return jsonify({
+                "error": "Missing required field: 'text'"
+            }), 400
+        
+        text = data['text'].strip()
+        
+        if not text:
+            return jsonify({
+                "error": "Text cannot be empty"
+            }), 400
+        
+        # Simple keyword extraction (you can enhance this with NLP libraries)
+        words = text.lower().split()
+        # Remove common stop words
+        stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'must', 'can', 'this', 'that', 'these', 'those'}
+        keywords = [word.strip('.,!?;:"()[]') for word in words if word not in stop_words and len(word) > 3]
+        
+        # Get unique keywords and their frequency
+        keyword_freq = {}
+        for keyword in keywords:
+            keyword_freq[keyword] = keyword_freq.get(keyword, 0) + 1
+        
+        # Sort by frequency and get top keywords
+        top_keywords = sorted(keyword_freq.items(), key=lambda x: x[1], reverse=True)[:10]
+        
+        return jsonify({
+            "keywords": [kw[0] for kw in top_keywords],
+            "keyword_frequencies": dict(top_keywords)
+        })
+    except Exception as e:
+        logger.error(f"Error occurred in /api/keywords: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/tone', methods=["POST"])
+def tone():
+    """Analyze tone endpoint"""
+    try:
+        data = request.get_json()
+        
+        if not data or 'text' not in data:
+            return jsonify({
+                "error": "Missing required field: 'text'"
+            }), 400
+        
+        text = data['text'].strip()
+        
+        if not text:
+            return jsonify({
+                "error": "Text cannot be empty"
+            }), 400
+        
+        # Simple tone analysis (you can enhance this with sentiment analysis libraries)
+        text_lower = text.lower()
+        
+        # Count different tone indicators
+        positive_words = ['good', 'great', 'excellent', 'amazing', 'wonderful', 'fantastic', 'love', 'like', 'happy', 'pleased']
+        negative_words = ['bad', 'terrible', 'awful', 'hate', 'dislike', 'angry', 'sad', 'disappointed', 'frustrated']
+        formal_words = ['therefore', 'furthermore', 'however', 'consequently', 'nevertheless', 'moreover']
+        
+        positive_count = sum(1 for word in positive_words if word in text_lower)
+        negative_count = sum(1 for word in negative_words if word in text_lower)
+        formal_count = sum(1 for word in formal_words if word in text_lower)
+        
+        # Determine tone
+        if positive_count > negative_count:
+            tone = "positive"
+        elif negative_count > positive_count:
+            tone = "negative"
+        else:
+            tone = "neutral"
+        
+        if formal_count > 2:
+            formality = "formal"
+        else:
+            formality = "informal"
+        
+        return jsonify({
+            "tone": tone,
+            "formality": formality,
+            "analysis": {
+                "positive_indicators": positive_count,
+                "negative_indicators": negative_count,
+                "formal_indicators": formal_count
+            }
+        })
+    except Exception as e:
+        logger.error(f"Error occurred in /api/tone: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/rephrase', methods=["POST"])
+def rephrase():
+    """Rephrase text endpoint"""
+    try:
+        data = request.get_json()
+        
+        if not data or 'text' not in data:
+            return jsonify({
+                "error": "Missing required field: 'text'"
+            }), 400
+        
+        text = data['text'].strip()
+        
+        if not text:
+            return jsonify({
+                "error": "Text cannot be empty"
+            }), 400
+        
+        # Use T5 model for paraphrasing
+        input_text = "paraphrase: " + text
+        
+        inputs = tokenizer(input_text, return_tensors="pt", max_length=512, truncation=True)
+        outputs = model.generate(
+            inputs["input_ids"], 
+            max_length=len(text.split()) + 50,  # Allow some expansion
+            min_length=max(5, len(text.split()) - 10),  # Don't make it too short
+            length_penalty=2.0, 
+            num_beams=4, 
+            early_stopping=True,
+            do_sample=True,
+            temperature=0.8
+        )
+        
+        rephrased = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        
+        return jsonify({
+            "original": text,
+            "rephrased": rephrased
+        })
+    except Exception as e:
+        logger.error(f"Error occurred in /api/rephrase: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=False, host='0.0.0.0', port=5000, use_reloader=False)

@@ -2,12 +2,10 @@
 
 QStringList commandRegistry::getAllCommands () {
     return {
-        "/summarise",
-        "summarise <percent>",
-        "/tone formal",
-        "/tone casual",
-        "/keywords",
-        "/rephrase",
-        "/rewrite"
+        "summarise",
+        "tone",
+        "keywords",
+        "rephrase",
+        "rewrite"
     };
 }
