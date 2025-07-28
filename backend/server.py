@@ -1,4 +1,5 @@
 from rapidfuzz import fuzz, process # Fuzzy search library
+import time # For speed benchmarking
 
 from flask import Flask, jsonify, request # Server framework
 from flask_cors import CORS # Enable CORS for Qt integration
@@ -13,11 +14,26 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
 
-# initialize the tokenizer and model for summarization
+# Initialize the tokenizer and model for summarization
+# Using DistilBART-CNN for better summarization quality and length control
+
 import os
-model_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "models", "t5-small")
-tokenizer = AutoTokenizer.from_pretrained(model_path)
-model = AutoModelForSeq2SeqLM.from_pretrained(model_path)
+local_model_path = os.path.join(os.path.dirname(__file__), "..", "models", "distilbart-cnn-12-6")
+logger.info(f"Loading DistilBART model from local directory: {local_model_path}")
+
+# Load from local model directory (packaged with the app)
+try:
+    tokenizer = AutoTokenizer.from_pretrained(local_model_path, local_files_only=True)
+    model = AutoModelForSeq2SeqLM.from_pretrained(local_model_path, local_files_only=True)
+    logger.info("Successfully loaded DistilBART model from local directory")
+except Exception as e:
+    logger.error(f"Failed to load local model: {e}")
+    # Fallback to Hugging Face if local model fails
+    model_name = "sshleifer/distilbart-cnn-12-6"
+    logger.info("Falling back to downloading from Hugging Face...")
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
+    logger.info("Successfully loaded DistilBART model from Hugging Face")
 
 def fuzzy_search(query, choices, limit=10):
     """Perform fuzzy search using rapidfuzz"""
@@ -85,12 +101,21 @@ def summarise():
         
         text = data['text'].strip()
         ratio = data.get('ratio', 0.25) # Default length of summarise is 25% of original text length
+        min_ratio = data.get('min_ratio', ratio * 0.8)  # Default to 80% of target ratio
+        max_ratio = data.get('max_ratio', ratio * 1.2)  # Default to 120% of target ratio
         
         # Validate ratio
         if not isinstance(ratio, (int, float)) or ratio <= 0 or ratio > 1:
             return jsonify({
                 "error": "Ratio must be a number between 0 and 1"
             }), 400
+        
+        # Validate min/max ratios
+        if not isinstance(min_ratio, (int, float)) or min_ratio <= 0 or min_ratio > 1:
+            min_ratio = max(0.05, ratio * 0.8)  # Fallback to 80% of target, minimum 5%
+            
+        if not isinstance(max_ratio, (int, float)) or max_ratio <= 0 or max_ratio > 1:
+            max_ratio = min(1.0, ratio * 1.2)   # Fallback to 120% of target, maximum 100%
         
         # Validate text length
         if not text:
@@ -108,31 +133,89 @@ def summarise():
                 "error": "Text too long. Maximum 10,000 characters allowed."
             }), 400
 
-        # Calculate target summary length based on ratio
+        # Calculate target summary length based on ratios
         original_word_count = len(text.split())
         target_length = max(10, int(original_word_count * ratio))  # Ensure minimum of 10 words
-        max_length = min(target_length + 20, 150)  # Add buffer, cap at 150
+        min_length = max(5, int(original_word_count * min_ratio))  # Minimum based on min_ratio
+        
+        # Remove arbitrary 150-word cap that breaks large summaries
+        # Allow up to 80% of original length for very high ratio requests
+        absolute_max = max(150, int(original_word_count * 0.8))  # Dynamic cap based on input size
+        max_length = min(int(original_word_count * max_ratio) + 10, absolute_max)
+        
+        # Ensure logical constraints
+        min_length = min(min_length, target_length - 5)  # Min should be less than target
+        max_length = max(max_length, target_length + 5)  # Max should be more than target
+        
+        logger.info(f"Summary parameters: original={original_word_count} words, "
+                   f"target={target_length} words ({ratio:.1%}), "
+                   f"range={min_length}-{max_length} words "
+                   f"({min_ratio:.1%}-{max_ratio:.1%})")
 
-        # Prepend task (required for T5-style models)
-        input_text = "summarize: " + text
+        # Start timing for performance monitoring
+        start_time = time.time()
 
-        inputs = tokenizer(input_text, return_tensors="pt", max_length=512, truncation=True)
+        # BART doesn't need task prefix like T5 - just use the text directly
+        inputs = tokenizer(text, return_tensors="pt", max_length=1024, truncation=True, padding=True)
+        
+        tokenization_time = time.time()
+        
+        # Generate summary with BART-optimized parameters (faster settings for better responsiveness)
         summary_ids = model.generate(
-            inputs["input_ids"], 
+            inputs["input_ids"],
+            attention_mask=inputs["attention_mask"],  # Important for BART
             max_length=max_length, 
-            min_length=max(5, target_length - 10), 
-            length_penalty=2.0, 
-            num_beams=4, 
-            early_stopping=True
+            min_length=min_length, 
+            length_penalty=1.5,       # Slightly reduced for faster generation
+            num_beams=2,              # Reduced from 4 to 2 for faster inference
+            early_stopping=True,      # Stop when EOS is reached
+            no_repeat_ngram_size=3,   # Prevent repetition
+            do_sample=False,          # Deterministic generation
+            forced_bos_token_id=tokenizer.bos_token_id  # Ensure proper start token
         )
 
+        generation_time = time.time()
         summary = tokenizer.decode(summary_ids[0], skip_special_tokens=True)
+        
+        # Clean up any remaining artifacts
+        summary = summary.strip()
+        
+        # Additional cleanup for malformed output
+        if summary.endswith(('..', '...', '....', 'and..', 'a.', 'the.', "it '", "'the.")):
+            # Find the last complete sentence
+            sentences = summary.split('.')
+            if len(sentences) > 1:
+                # Keep all complete sentences except the last incomplete one
+                summary = '.'.join(sentences[:-1]) + '.'
+        
+        # Ensure summary is not empty after cleanup
+        if not summary.strip():
+            summary = "Summary could not be generated properly. Please try again with different text."
+        
+        end_time = time.time()
+        
+        # Calculate timing metrics
+        total_time = end_time - start_time
+        tokenization_duration = tokenization_time - start_time
+        generation_duration = generation_time - tokenization_time
+        decoding_duration = end_time - generation_time
+        
+        logger.info(f"Performance metrics: Total={total_time:.2f}s, "
+                   f"Tokenization={tokenization_duration:.2f}s, "
+                   f"Generation={generation_duration:.2f}s, "
+                   f"Decoding={decoding_duration:.2f}s")
         
         return jsonify({
             "summary": summary,
             "original_length": len(text.split()),
             "summary_length": len(summary.split()),
-            "compression_ratio": round(len(summary.split()) / len(text.split()), 3)
+            "compression_ratio": round(len(summary.split()) / len(text.split()), 3),
+            "performance": {
+                "total_time": round(total_time, 2),
+                "tokenization_time": round(tokenization_duration, 2),
+                "generation_time": round(generation_duration, 2),
+                "decoding_time": round(decoding_duration, 2)
+            }
         })
     except Exception as e:
         logger.error(f"Error occurred in /api/summarise: {str(e)}")
@@ -252,12 +335,16 @@ def rephrase():
                 "error": "Text cannot be empty"
             }), 400
         
-        # Use T5 model for paraphrasing
-        input_text = "paraphrase: " + text
+        # Use DistilBART model for paraphrasing
+        # DistilBART doesn't need a task prefix like T5
+        inputs = tokenizer(text, return_tensors="pt", max_length=512, truncation=True, padding=True)
         
-        inputs = tokenizer(input_text, return_tensors="pt", max_length=512, truncation=True)
+        # Generate attention mask for BART
+        attention_mask = inputs.get('attention_mask', None)
+        
         outputs = model.generate(
-            inputs["input_ids"], 
+            inputs["input_ids"],
+            attention_mask=attention_mask,
             max_length=len(text.split()) + 50,  # Allow some expansion
             min_length=max(5, len(text.split()) - 10),  # Don't make it too short
             length_penalty=2.0, 

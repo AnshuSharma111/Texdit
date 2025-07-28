@@ -5,7 +5,7 @@
 
 const QString ServerManager::SERVER_BASE_URL = "http://127.0.0.1:5000";
 const int ServerManager::HEALTH_CHECK_INTERVAL = 1000; // 1 second for more responsive feedback
-const int ServerManager::REQUEST_TIMEOUT = 8000; // 8 seconds for model loading
+const int ServerManager::REQUEST_TIMEOUT = 30000; // 30 seconds for AI model processing
 const int ServerManager::MAX_RETRY_ATTEMPTS = 15; // 15 attempts = 15 seconds total
 
 ServerManager::ServerManager(QObject *parent)

@@ -19,10 +19,13 @@
 #include <QEvent>
 #include <QTimer>
 #include <QLabel>
+#include <QTabWidget>
+#include <QTextBrowser>
+#include <QDateTime>
+#include "commandmanager.h"
 
 // Forward declarations for our managers
 class ServerManager;
-class CommandManager;
 
 class MainWindow : public QMainWindow
 {
@@ -34,11 +37,14 @@ public:
 
 private:
     // UI Components
+    QTabWidget* tabWidget;
     QTextEdit* input;
+    QTextBrowser* debugLog;
     QLineEdit* command;
     QPushButton* executeButton;
     QLabel* statusLabel;
     QAction* goToCommandBox;
+    QAction* toggleDebugTab;
     QVBoxLayout* layout;
     
     // Suggestion system
@@ -51,6 +57,11 @@ private:
     
     // UI State
     bool suggestionsVisible;
+    bool commandExecuting;
+    bool debugTabVisible;
+    QTimer* workingAnimationTimer;
+    int workingAnimationState;
+    QDateTime commandStartTime;
 
 protected:
     bool eventFilter(QObject *obj, QEvent *event) override;
@@ -58,6 +69,7 @@ protected:
 private slots:
     // UI Events
     void onPressCtrlSlash();
+    void toggleDebugPanel();
     void commandTextEdited();
     void onSuggestionClicked(const QModelIndex &index);
     
@@ -65,6 +77,8 @@ private slots:
     void executeCommand();
     void onCommandExecuted(const QString& command, int result, const QString& output);
     void onSuggestionsReceived(const QString& query, const QStringList& suggestions);
+    void onCommandExecutionStateChanged(CommandManager::ExecutionState state);
+    void updateWorkingAnimation();
     
     // Server Status
     void onServerStatusChanged(int status);
@@ -74,6 +88,7 @@ private:
     void setupUI();
     void setupConnections();
     void setupSuggestions();
+    void logDebugEvent(const QString& message);
     void displaySuggestions(const QStringList& suggestionList);
     void hideSuggestions();
     void updateServerStatus(const QString& message, bool isError = false);

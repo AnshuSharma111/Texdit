@@ -1,5 +1,6 @@
 #include "commandmanager.h"
 #include "servermanager.h"
+#include "commandRegistry.h"
 #include <QDebug>
 #include <QJsonDocument>
 #include <QDateTime>
@@ -8,6 +9,7 @@
 CommandManager::CommandManager(ServerManager* serverManager, QObject *parent)
     : QObject(parent)
     , server(serverManager)
+    , executionState(Idle)
 {
     initializeCommands();
     
@@ -28,7 +30,7 @@ void CommandManager::initializeCommands()
     
     commands["summarise"] = {
         "summarise",
-        "Generate a summary of the input text",
+        "Generate a summary of the input text. Usage: 'summarise' (20-30%) or 'summarise <percentage>' (e.g., 'summarise 50' for 45-55% range)",
         true,  // requires server
         true   // requires input
     };
@@ -113,7 +115,15 @@ CommandManager::CommandInfo CommandManager::getCommandInfo(const QString& comman
 
 bool CommandManager::isCommandValid(const QString& command) const
 {
-    return commands.contains(command);
+    // Try direct lookup first
+    if (commands.contains(command)) {
+        return true;
+    }
+    
+    // Parse command with arguments
+    QString baseCommand;
+    QJsonObject args;
+    return parseCommandWithArgs(command, baseCommand, args) && commands.contains(baseCommand);
 }
 
 void CommandManager::executeCommand(const QString& command, const QString& inputText,
@@ -121,21 +131,47 @@ void CommandManager::executeCommand(const QString& command, const QString& input
 {
     qDebug() << "CommandManager: Executing command:" << command;
     
-    // Validate command exists
-    if (!isCommandValid(command)) {
+    // Check if already executing
+    if (executionState == Executing) {
+        QString error = "Cannot execute command: another command is already running";
+        qDebug() << "CommandManager: ❌" << error;
+        if (callback) callback(ExecutionError, error);
+        emit commandExecuted(command, ExecutionError, error);
+        return;
+    }
+    
+    // Set execution state
+    executionState = Executing;
+    emit executionStateChanged(executionState);
+    
+    // Parse and validate command
+    QString baseCommand;
+    QJsonObject args;
+    
+    if (!parseCommandWithArgs(command, baseCommand, args)) {
         QString error = QString("Unknown command: %1").arg(command);
         qDebug() << "CommandManager: ❌" << error;
+        
+        // Reset execution state
+        executionState = Idle;
+        emit executionStateChanged(executionState);
+        
         if (callback) callback(InvalidCommand, error);
         emit commandExecuted(command, InvalidCommand, error);
         return;
     }
     
-    CommandInfo info = getCommandInfo(command);
+    CommandInfo info = getCommandInfo(baseCommand);
     
-    // Check if command is currently available
-    if (!availableCommands.contains(command)) {
-        QString error = QString("Command '%1' is not available (server required but not ready)").arg(command);
+    // Check if base command is currently available
+    if (!availableCommands.contains(baseCommand)) {
+        QString error = QString("Command '%1' is not available (server required but not ready)").arg(baseCommand);
         qDebug() << "CommandManager: ❌" << error;
+        
+        // Reset execution state
+        executionState = Idle;
+        emit executionStateChanged(executionState);
+        
         if (callback) callback(ServerError, error);
         emit commandExecuted(command, ServerError, error);
         return;
@@ -143,18 +179,32 @@ void CommandManager::executeCommand(const QString& command, const QString& input
     
     // Validate input requirements
     if (info.requiresInput && inputText.trimmed().isEmpty()) {
-        QString error = QString("Command '%1' requires input text").arg(command);
+        QString error = QString("Command '%1' requires input text").arg(baseCommand);
         qDebug() << "CommandManager: ❌" << error;
+        
+        // Reset execution state
+        executionState = Idle;
+        emit executionStateChanged(executionState);
+        
         if (callback) callback(ValidationError, error);
         emit commandExecuted(command, ValidationError, error);
         return;
     }
     
+    // Create a wrapper callback that resets execution state
+    auto wrappedCallback = [this, callback](CommandResult result, const QString& output) {
+        // Reset execution state when command completes
+        executionState = Idle;
+        emit executionStateChanged(executionState);
+        
+        if (callback) callback(result, output);
+    };
+    
     // Route to appropriate execution method
     if (info.requiresServer) {
-        executeServerCommand(command, inputText, callback);
+        executeServerCommand(command, inputText, wrappedCallback);
     } else {
-        executeLocalCommand(command, inputText, callback);
+        executeLocalCommand(baseCommand, inputText, wrappedCallback);
     }
 }
 
@@ -196,25 +246,29 @@ void CommandManager::executeServerCommand(const QString& command, const QString&
 {
     qDebug() << "CommandManager: Executing server command:" << command;
     
-    // Prepare request data
+    // Parse command and arguments
+    QString baseCommand;
     QJsonObject requestData;
-    requestData["command"] = command;
+    
+    if (!parseCommandWithArgs(command, baseCommand, requestData)) {
+        QString error = QString("Invalid command format: %1").arg(command);
+        qDebug() << "CommandManager: ❌" << error;
+        if (callback) callback(ValidationError, error);
+        emit commandExecuted(command, ValidationError, error);
+        return;
+    }
+    
+    // Add common fields
     requestData["text"] = inputText;
     requestData["timestamp"] = QDateTime::currentSecsSinceEpoch();
     
     // Make server request
     server->makeRequest(
-        QString("/api/%1").arg(command),
+        QString("/api/%1").arg(baseCommand),
         requestData,
         [=](const QJsonObject& response) {
-            // Success callback
-            QString result = response.value("result").toString();
-            if (result.isEmpty()) {
-                result = response.value("output").toString();
-            }
-            if (result.isEmpty()) {
-                result = QString("Command '%1' executed successfully").arg(command);
-            }
+            // Success callback - format response appropriately
+            QString result = formatServerResponse(baseCommand, response);
             
             qDebug() << "CommandManager: ✅ Server command completed:" << command;
             if (callback) callback(Success, result);
@@ -230,47 +284,146 @@ void CommandManager::executeServerCommand(const QString& command, const QString&
     );
 }
 
+bool CommandManager::parseCommandWithArgs(const QString& command, QString& baseCommand, QJsonObject& args) const
+{
+    QStringList parts = command.split(' ', Qt::SkipEmptyParts);
+    if (parts.isEmpty()) {
+        return false;
+    }
+    
+    baseCommand = parts[0].toLower();
+    
+    // Handle specific command patterns
+    if (baseCommand == "summarise" || baseCommand == "summarize") {
+        baseCommand = "summarise"; // Normalize to backend spelling
+        
+        if (parts.size() > 1) {
+            // Validate format: should be exactly "summarise <percentage>"
+            if (parts.size() > 2) {
+                qDebug() << "CommandManager: Too many arguments for summarise. Usage: 'summarise' or 'summarise <percentage>'";
+                return false;
+            }
+            
+            // Parse "summarise <int>" format
+            bool ok;
+            int percentage = parts[1].toInt(&ok);
+            
+            if (!ok || percentage <= 0 || percentage >= 100) {
+                qDebug() << "CommandManager: Invalid summarise percentage:" << parts[1] << ". Must be between 1-99.";
+                return false;
+            }
+            
+            // Convert percentage to ratio (backend expects 0-1)
+            double ratio = percentage / 100.0;
+            args["ratio"] = ratio;
+            
+            // Calculate intelligent min/max range for better quality
+            // For user-specified percentages, use a tighter range around the target
+            double minRatio = qMax(0.05, ratio * 0.9);  // 90% of target, minimum 5%
+            double maxRatio = ratio * 1.1;              // 110% of target
+            
+            args["min_ratio"] = minRatio;
+            args["max_ratio"] = maxRatio;
+            
+            qDebug() << "CommandManager: Parsed summarise command with" << percentage 
+                     << "% target ratio (" << ratio << "), range:" << (minRatio * 100) 
+                     << "% -" << (maxRatio * 100) << "%";
+        } else {
+            // Use default ratio (25%) with a reasonable range
+            args["ratio"] = 0.25;
+            args["min_ratio"] = 0.20;  // 20%
+            args["max_ratio"] = 0.30;  // 30%
+            qDebug() << "CommandManager: Using default summarise ratio (25%) with range 20%-30%";
+        }
+        
+        return true;
+    }
+    
+    // For other commands, just validate they exist
+    if (commands.contains(baseCommand)) {
+        return true;
+    }
+    
+    qDebug() << "CommandManager: Unknown base command:" << baseCommand;
+    return false;
+}
+
+QString CommandManager::formatServerResponse(const QString& command, const QJsonObject& response) const
+{
+    if (command == "summarise") {
+        // Handle summarise-specific response format
+        if (response.contains("error")) {
+            return QString("Error: %1").arg(response["error"].toString());
+        }
+        
+        QString summary = response["summary"].toString();
+        int originalLength = response["original_length"].toInt();
+        int summaryLength = response["summary_length"].toInt();
+        double compressionRatio = response["compression_ratio"].toDouble();
+        
+        // Extract performance data if available
+        QString performanceInfo;
+        if (response.contains("performance")) {
+            QJsonObject perf = response["performance"].toObject();
+            double totalTime = perf["total_time"].toDouble();
+            double tokenizationTime = perf["tokenization_time"].toDouble();
+            double generationTime = perf["generation_time"].toDouble();
+            double decodingTime = perf["decoding_time"].toDouble();
+            
+            performanceInfo = QString("\n\n⚡ Performance Metrics (DistilBART-CNN-12-6):\n");
+            performanceInfo += QString("• Total time: %1s\n").arg(QString::number(totalTime, 'f', 2));
+            performanceInfo += QString("• Tokenization: %1s\n").arg(QString::number(tokenizationTime, 'f', 2));
+            performanceInfo += QString("• Generation: %1s\n").arg(QString::number(generationTime, 'f', 2));
+            performanceInfo += QString("• Decoding: %1s").arg(QString::number(decodingTime, 'f', 2));
+        }
+        
+        QString result = summary;
+        result += QString("\n\n📊 Summary Stats:\n");
+        result += QString("• Original: %1 words\n").arg(originalLength);
+        result += QString("• Summary: %1 words (%2%)\n").arg(summaryLength).arg(QString::number(compressionRatio * 100, 'f', 1));
+        result += QString("• Quality: High-precision summary with intelligent length control");
+        result += performanceInfo;
+        
+        return result;
+    }
+    
+    // Default handling for other commands
+    QString result = response.value("result").toString();
+    if (result.isEmpty()) {
+        result = response.value("output").toString();
+    }
+    if (result.isEmpty()) {
+        result = QString("Command '%1' executed successfully").arg(command);
+    }
+    
+    return result;
+}
+
 void CommandManager::getSuggestions(const QString& query,
                                    std::function<void(const QStringList&)> callback)
 {
-    QStringList suggestions;
-    QString lowerQuery = query.toLower();
+    // Use the new contextual suggestion system
+    QStringList suggestions = commandRegistry::getContextualSuggestions(query);
     
-    // Search through ALL commands, not just available ones
-    for (auto it = commands.begin(); it != commands.end(); ++it) {
-        const QString& command = it.key();
-        if (command.toLower().contains(lowerQuery)) {
-            suggestions.append(command);
-        }
-    }
-    
-    // Sort by relevance (exact match first, then starts with, then contains)
-    std::sort(suggestions.begin(), suggestions.end(), [&](const QString& a, const QString& b) {
-        bool aExact = a.toLower() == lowerQuery;
-        bool bExact = b.toLower() == lowerQuery;
-        if (aExact != bExact) return aExact;
-        
-        bool aStarts = a.toLower().startsWith(lowerQuery);
-        bool bStarts = b.toLower().startsWith(lowerQuery);
-        if (aStarts != bStarts) return aStarts;
-        
-        return a < b; // Alphabetical for same relevance
-    });
-    
-    qDebug() << "CommandManager: Suggestions for" << query << ":" << suggestions;
+    qDebug() << "CommandManager: Contextual suggestions for" << query << ":" << suggestions;
     
     // Always call the callback with our suggestions
     if (callback) callback(suggestions);
     emit suggestionsAvailable(query, suggestions);
     
-    // If server is ready, also try server-based fuzzy search for enhanced results
-    if (server->isReady()) {
+    // If server is ready and we're looking for command matches (not arguments), 
+    // also try server-based fuzzy search for enhanced results
+    QString trimmedQuery = query.trimmed();
+    QStringList parts = trimmedQuery.split(' ', Qt::SkipEmptyParts);
+    
+    if (server->isReady() && parts.size() == 1 && !trimmedQuery.isEmpty()) {
         QJsonObject requestData;
         requestData["query"] = query;
         
         QJsonArray choices;
-        for (auto it = commands.begin(); it != commands.end(); ++it) {
-            choices.append(it.key());
+        QStringList allCommands = commandRegistry::getAllCommands();
+        for (const QString& cmd : allCommands) {
+            choices.append(cmd);
         }
         requestData["choices"] = choices;
         
@@ -279,12 +432,12 @@ void CommandManager::getSuggestions(const QString& query,
             requestData,
             [=](const QJsonObject& response) {
                 QStringList serverSuggestions;
-                QJsonArray results = response["suggestions"].toArray();
+                QJsonArray results = response["results"].toArray();
                 for (const QJsonValue& value : results) {
                     serverSuggestions.append(value.toString());
                 }
                 
-                if (!serverSuggestions.isEmpty()) {
+                if (!serverSuggestions.isEmpty() && serverSuggestions != suggestions) {
                     qDebug() << "CommandManager: Server enhanced suggestions:" << serverSuggestions;
                     // Emit server suggestions if they're different/better
                     emit suggestionsAvailable(query, serverSuggestions);

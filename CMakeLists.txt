@@ -23,6 +23,8 @@ set(PROJECT_SOURCES
         servermanager.h
         commandmanager.cpp
         commandmanager.h
+        commandRegistry.cpp
+        commandRegistry.h
 )
 
 if(${QT_VERSION_MAJOR} GREATER_EQUAL 6)

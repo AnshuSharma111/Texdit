@@ -12,6 +12,10 @@
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , suggestionsVisible(false)
+    , commandExecuting(false)
+    , debugTabVisible(false)
+    , workingAnimationTimer(new QTimer(this))
+    , workingAnimationState(0)
 {
     // Initialize managers first
     serverManager = new ServerManager(this);
@@ -22,6 +26,10 @@ MainWindow::MainWindow(QWidget *parent)
     setupConnections();
     setupSuggestions();
     
+    // Setup working animation timer
+    workingAnimationTimer->setInterval(500); // 500ms between dots
+    connect(workingAnimationTimer, &QTimer::timeout, this, &MainWindow::updateWorkingAnimation);
+    
     // Start health monitoring since server should already be running
     QTimer::singleShot(1000, this, [this]() {
         if (serverManager) {
@@ -30,6 +38,7 @@ MainWindow::MainWindow(QWidget *parent)
     });
     
     qDebug() << "MainWindow: Initialized with robust foundation";
+    logDebugEvent("Application: TexDit initialized successfully");
 }
 
 MainWindow::~MainWindow()
@@ -46,7 +55,10 @@ void MainWindow::setupUI()
     layout->setSpacing(10);
     layout->setContentsMargins(20, 20, 20, 20);
     
-    // Create main text input area
+    // Create tab widget
+    tabWidget = new QTabWidget(this);
+    
+    // Create main text input area (Main tab)
     input = new QTextEdit(this);
     input->setPlaceholderText("Enter text here...");
     
@@ -55,6 +67,27 @@ void MainWindow::setupUI()
     if (!clipboard->text().isEmpty()) {
         input->setText(clipboard->text());
     }
+    
+    // Create debug log area (Debug tab)
+    debugLog = new QTextBrowser(this);
+    debugLog->setStyleSheet(
+        "QTextBrowser {"
+        "    background-color: #2b2b2b;"
+        "    color: #ffffff;"
+        "    font-family: 'Consolas', 'Monaco', monospace;"
+        "    font-size: 11px;"
+        "    border: 1px solid #555;"
+        "}"
+    );
+    debugLog->setPlainText("Debug log initialized...\n");
+    
+    // Add tabs
+    tabWidget->addTab(input, "Editor");
+    tabWidget->addTab(debugLog, "Debug");
+    
+    // Hide debug tab initially
+    tabWidget->removeTab(1);
+    debugTabVisible = false;
     
     // Create command input area with execute button
     QHBoxLayout* commandLayout = new QHBoxLayout();
@@ -82,16 +115,20 @@ void MainWindow::setupUI()
     );
     
     // Add widgets to main layout
-    layout->addWidget(input, 8);           // Main text area (80% of space)
+    layout->addWidget(tabWidget, 8);       // Tab widget (80% of space)
     layout->addLayout(commandLayout, 0);   // Command input (fixed height)
     layout->addWidget(statusLabel, 0);     // Status (fixed height)
     
     setCentralWidget(centralWidget);
     
-    // Setup keyboard shortcut for command focus
+    // Setup keyboard shortcuts
     goToCommandBox = new QAction(tr("Focus Command Box"), this);
     goToCommandBox->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Slash));
     addAction(goToCommandBox);
+    
+    toggleDebugTab = new QAction(tr("Toggle Debug Panel"), this);
+    toggleDebugTab->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_D));
+    addAction(toggleDebugTab);
     
     qDebug() << "MainWindow: UI setup complete";
 }
@@ -105,11 +142,13 @@ void MainWindow::setupConnections()
     
     // Keyboard shortcut
     connect(goToCommandBox, &QAction::triggered, this, &MainWindow::onPressCtrlSlash);
+    connect(toggleDebugTab, &QAction::triggered, this, &MainWindow::toggleDebugPanel);
     
     // Manager connections
     connect(serverManager, &ServerManager::statusChanged, this, &MainWindow::onServerStatusChanged);
     connect(commandManager, &CommandManager::commandExecuted, this, &MainWindow::onCommandExecuted);
     connect(commandManager, &CommandManager::suggestionsAvailable, this, &MainWindow::onSuggestionsReceived);
+    connect(commandManager, &CommandManager::executionStateChanged, this, &MainWindow::onCommandExecutionStateChanged);
     
     // Install event filter for advanced input handling
     command->installEventFilter(this);
@@ -154,6 +193,7 @@ void MainWindow::onPressCtrlSlash()
     if (!command->hasFocus()) {
         command->setFocus();
         command->selectAll(); // Select all text for easy replacement
+        logDebugEvent("Action: Focus switched to command box (Ctrl+/)");
         qDebug() << "MainWindow: Focus shifted to command input";
     }
 }
@@ -168,14 +208,8 @@ void MainWindow::commandTextEdited()
         return;
     }
     
-    // Check if this is already a complete command
-    if (commandManager->isCommandValid(text)) {
-        qDebug() << "MainWindow: Complete command entered, hiding suggestions";
-        hideSuggestions();
-        return;
-    }
-    
-    // Get suggestions for partial input
+    // Always get suggestions for any non-empty input
+    // Don't hide suggestions based on isCommandValid check - let the user see arguments
     commandManager->getSuggestions(text, [this](const QStringList& suggestions) {
         // This callback will be called when suggestions are ready
         // The onSuggestionsReceived slot will handle the actual display
@@ -188,10 +222,15 @@ void MainWindow::executeCommand()
     
     if (commandText.isEmpty()) {
         updateServerStatus("Please enter a command", true);
+        logDebugEvent("Action: Execute pressed (empty command)");
         return;
     }
     
     qDebug() << "MainWindow: Executing command:" << commandText;
+    logDebugEvent(QString("Action: Execute pressed - '%1'").arg(commandText));
+    
+    // Record start time for performance tracking
+    commandStartTime = QDateTime::currentDateTime();
     
     // Hide suggestions
     hideSuggestions();
@@ -214,7 +253,25 @@ void MainWindow::onCommandExecuted(const QString& command, int result, const QSt
     CommandManager::CommandResult cmdResult = static_cast<CommandManager::CommandResult>(result);
     bool success = (cmdResult == CommandManager::Success);
     
+    // Calculate execution time
+    qint64 executionTimeMs = commandStartTime.msecsTo(QDateTime::currentDateTime());
+    double executionTimeSecs = executionTimeMs / 1000.0;
+    
     qDebug() << "MainWindow: Command" << command << "completed with result:" << result;
+    
+    // Log command completion with timing
+    QString resultText = success ? "SUCCESS" : "FAILED";
+    QString logMessage = QString("Query: %1 [%2] - Executed in %3 seconds")
+                        .arg(command)
+                        .arg(resultText)
+                        .arg(QString::number(executionTimeSecs, 'f', 2));
+    
+    // Add model information for AI commands
+    if (success && (command == "summarise" || command == "tone" || command == "keywords" || command == "rephrase")) {
+        logMessage += " using DistilBART-CNN-12-6";
+    }
+    
+    logDebugEvent(logMessage);
     
     showCommandFeedback(command, success, output);
     
@@ -247,21 +304,27 @@ void MainWindow::onServerStatusChanged(int status)
 {
     ServerManager::ServerStatus serverStatus = static_cast<ServerManager::ServerStatus>(status);
     
+    QString statusName;
     switch (serverStatus) {
         case ServerManager::Disconnected:
             updateServerStatus("Server disconnected", true);
+            statusName = "Disconnected";
             break;
         case ServerManager::Connecting:
             updateServerStatus("Connecting to server...");
+            statusName = "Connecting";
             break;
         case ServerManager::Connected:
             updateServerStatus("Server connected - All features available");
+            statusName = "Connected";
             break;
         case ServerManager::Error:
             updateServerStatus("Server error - Local commands only", true);
+            statusName = "Error";
             break;
     }
     
+    logDebugEvent(QString("Action: Server status changed to %1").arg(statusName));
     qDebug() << "MainWindow: Server status changed to:" << status;
 }
 
@@ -274,7 +337,9 @@ void MainWindow::displaySuggestions(const QStringList& suggestionList)
     
     qDebug() << "MainWindow: Displaying" << suggestionList.size() << "suggestions";
     
-    suggestions_popup->setStringList(suggestionList);
+    // For Minecraft-style suggestions, limit to maximum 4 items
+    QStringList limitedSuggestions = suggestionList.mid(0, 4);
+    suggestions_popup->setStringList(limitedSuggestions);
     
     // Position suggestions below command input
     int cursorPos = command->cursorPosition();
@@ -284,13 +349,12 @@ void MainWindow::displaySuggestions(const QStringList& suggestionList)
     QPoint caretPos(textWidth, command->height());
     QPoint globalCaretPos = command->mapToGlobal(caretPos);
     
-    // Calculate popup size
-    int rowCount = suggestions_popup->rowCount();
-    int itemHeight = suggestions->sizeHintForRow(0);
-    if (itemHeight <= 0) itemHeight = 25; // Fallback height
+    // Calculate compact popup size (Minecraft style)
+    int rowCount = limitedSuggestions.size();
+    int itemHeight = 20; // Smaller, more compact items
     
-    int popupHeight = itemHeight * qMin(rowCount, 6); // Max 6 items visible
-    int popupWidth = 250;
+    int popupHeight = itemHeight * rowCount;
+    int popupWidth = 200; // Narrower width
     
     suggestions->resize(popupWidth, popupHeight);
     suggestions->move(globalCaretPos);
@@ -304,7 +368,7 @@ void MainWindow::displaySuggestions(const QStringList& suggestionList)
     suggestions->show();
     suggestionsVisible = true;
     
-    qDebug() << "MainWindow: Suggestions popup shown at:" << globalCaretPos;
+    qDebug() << "MainWindow: Compact suggestions popup shown at:" << globalCaretPos;
 }
 
 void MainWindow::hideSuggestions()
@@ -516,4 +580,75 @@ bool MainWindow::eventFilter(QObject *obj, QEvent *event)
     
     // Pass the event to the base class
     return QMainWindow::eventFilter(obj, event);
+}
+
+void MainWindow::onCommandExecutionStateChanged(CommandManager::ExecutionState state)
+{
+    bool executing = (state == CommandManager::ExecutionState::Executing);
+    commandExecuting = executing;
+    
+    // Update UI state
+    command->setEnabled(!executing);
+    executeButton->setEnabled(!executing);
+    
+    if (executing) {
+        // Start working animation
+        workingAnimationState = 0;
+        workingAnimationTimer->start();
+        statusLabel->setText("Working.");
+        statusLabel->setStyleSheet("color: blue;");
+    } else {
+        // Stop animation and clear status
+        workingAnimationTimer->stop();
+        statusLabel->setText("Ready");
+        statusLabel->setStyleSheet("color: green;");
+    }
+    
+    qDebug() << "MainWindow: Command execution state changed to" << (executing ? "executing" : "idle");
+}
+
+void MainWindow::updateWorkingAnimation()
+{
+    if (!commandExecuting) {
+        return; // Safety check
+    }
+    
+    workingAnimationState = (workingAnimationState + 1) % 3;
+    
+    QString workingText = "Working";
+    for (int i = 0; i <= workingAnimationState; ++i) {
+        workingText += ".";
+    }
+    
+    statusLabel->setText(workingText);
+}
+
+void MainWindow::toggleDebugPanel()
+{
+    if (debugTabVisible) {
+        // Hide debug tab
+        tabWidget->removeTab(tabWidget->indexOf(debugLog));
+        debugTabVisible = false;
+        logDebugEvent("Action: Debug panel hidden");
+        qDebug() << "MainWindow: Debug panel hidden";
+    } else {
+        // Show debug tab
+        tabWidget->addTab(debugLog, "Debug");
+        debugTabVisible = true;
+        logDebugEvent("Action: Debug panel shown");
+        qDebug() << "MainWindow: Debug panel shown";
+    }
+}
+
+void MainWindow::logDebugEvent(const QString& message)
+{
+    QString timestamp = QDateTime::currentDateTime().toString("dd/MM/yy hh:mm:ss");
+    QString logEntry = QString("[%1] %2\n").arg(timestamp, message);
+    
+    debugLog->append(logEntry);
+    
+    // Auto-scroll to bottom
+    QTextCursor cursor = debugLog->textCursor();
+    cursor.movePosition(QTextCursor::End);
+    debugLog->setTextCursor(cursor);
 }

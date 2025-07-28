@@ -4,6 +4,7 @@
 #include <QScreen>
 #include <QDebug>
 #include <QPointer>
+#include <QFile>
 
 // Static server process definition
 QProcess* LoadingScreen::globalServerProcess = nullptr;
@@ -30,20 +31,32 @@ LoadingScreen::LoadingScreen(QWidget *parent)
     
     // Start text animation
     animationTimer = new QTimer(this);
-    connect(animationTimer, &QTimer::timeout, this, &LoadingScreen::updateLoadingText);
+    
+    // Use QPointer for safe timer callback
+    QPointer<LoadingScreen> self(this);
+    connect(animationTimer, &QTimer::timeout, [self]() {
+        if (self) {
+            self->updateLoadingText();
+        }
+    });
     animationTimer->start(1500); // Change text every 1.5 seconds for better feedback
     
-    // Connect to server manager signals
-    connect(serverManager, &ServerManager::statusChanged, this, &LoadingScreen::onServerStatusChanged);
+    // Connect to server manager signals using QPointer for safety
+    QPointer<LoadingScreen> selfForManager(this);
+    connect(serverManager, &ServerManager::statusChanged, [selfForManager](ServerManager::ServerStatus status) {
+        if (selfForManager) {
+            selfForManager->onServerStatusChanged(status);
+        }
+    });
     
     // Start the server first, then begin health checking
     qDebug() << "LoadingScreen: Starting Python server...";
     
-    // Use QPointer for safe timer callback
-    QPointer<LoadingScreen> self(this);
-    QTimer::singleShot(1000, [self]() {
-        if (self) {
-            self->initializeServer();
+    // Use QPointer for safe timer callback for server initialization
+    QPointer<LoadingScreen> selfInit(this);
+    QTimer::singleShot(1000, [selfInit]() {
+        if (selfInit) {
+            selfInit->initializeServer();
         }
     });
     
@@ -79,7 +92,30 @@ void LoadingScreen::startServerProcess()
     }
     
     qDebug() << "LoadingScreen: Starting global server process";
-    globalServerProcess->start("python", QStringList() << "../../backend/server.py");
+    
+    // Try different paths for the server script
+    QStringList serverPaths = {
+        "d:/texdit/backend/server.py",  // Absolute path
+        "../../backend/server.py",      // Relative path from build directory
+        "../backend/server.py",         // Alternative relative path
+        "backend/server.py"             // Direct relative path
+    };
+    
+    QString serverPath;
+    for (const QString& path : serverPaths) {
+        if (QFile::exists(path)) {
+            serverPath = path;
+            qDebug() << "LoadingScreen: Found server at:" << serverPath;
+            break;
+        }
+    }
+    
+    if (serverPath.isEmpty()) {
+        qDebug() << "LoadingScreen: ❌ Could not find server.py in any expected location";
+        return;
+    }
+    
+    globalServerProcess->start("python", QStringList() << serverPath);
     
     QObject::connect(globalServerProcess, &QProcess::readyReadStandardOutput, []() {
         qDebug() << "Server output:" << globalServerProcess->readAllStandardOutput();
@@ -114,6 +150,7 @@ void LoadingScreen::stopServerProcess()
 
 void LoadingScreen::initializeServer()
 {
+    // Try to start server if not already running externally
     startServerProcess();
     
     // Show progress during startup wait
@@ -296,6 +333,7 @@ void LoadingScreen::onServerStatusChanged(int status)
 {
     switch (status) {
         case ServerManager::Connected:
+        {
             qDebug() << "LoadingScreen: ✅ Server is ready!";
             animationTimer->stop();
             
@@ -304,11 +342,15 @@ void LoadingScreen::onServerStatusChanged(int status)
             progressBar->setRange(0, 100);
             progressBar->setValue(100);
             
-            // Brief delay before emitting ready signal
-            QTimer::singleShot(1000, this, [=]() {
-                emit serverReady();
+            // Brief delay before emitting ready signal using QPointer for safety
+            QPointer<LoadingScreen> self(this);
+            QTimer::singleShot(1000, [self]() {
+                if (self) {
+                    emit self->serverReady();
+                }
             });
             break;
+        }
             
         case ServerManager::Connecting:
             statusLabel->setText("Connecting to server...");
@@ -342,20 +384,27 @@ void LoadingScreen::updateLoadingText()
 
 void LoadingScreen::onRetryClicked()
 {
-    qDebug() << "LoadingScreen: Retry clicked, restarting server and health check";
+    qDebug() << "LoadingScreen: Retry clicked, checking server and restarting if needed";
     hideRetryOption();
     
     // Restart animations
     animationTimer->start(1500);
     
-    statusLabel->setText("Restarting server...");
+    statusLabel->setText("Checking server status...");
     loadingIcon->setText("⏳");
     progressBar->setRange(0, 0); // Back to indeterminate
     
-    // Stop any existing server process and restart
-    stopServerProcess();
-    QTimer::singleShot(2000, [this]() {
-        initializeServer();
+    // First, try to restart server if it's not running
+    if (!globalServerProcess || globalServerProcess->state() != QProcess::Running) {
+        statusLabel->setText("Restarting server...");
+        stopServerProcess(); // Clean up any dead process
+    }
+    
+    QPointer<LoadingScreen> self(this);
+    QTimer::singleShot(1000, [self]() {
+        if (self) {
+            self->initializeServer();
+        }
     });
 }
 

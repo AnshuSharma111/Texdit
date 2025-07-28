@@ -23,6 +23,11 @@ public:
         ExecutionError
     };
 
+    enum ExecutionState {
+        Idle,
+        Executing
+    };
+
     struct CommandInfo {
         QString name;
         QString description;
@@ -38,6 +43,10 @@ public:
     CommandInfo getCommandInfo(const QString& command) const;
     bool isCommandValid(const QString& command) const;
     
+    // Execution state
+    ExecutionState getExecutionState() const { return executionState; }
+    bool isExecuting() const { return executionState == Executing; }
+    
     // Command execution
     void executeCommand(const QString& command, const QString& inputText = "",
                        std::function<void(CommandResult, const QString&)> callback = nullptr);
@@ -48,6 +57,7 @@ public:
 
 signals:
     void commandExecuted(const QString& command, CommandResult result, const QString& output);
+    void executionStateChanged(ExecutionState state);
     void suggestionsAvailable(const QString& query, const QStringList& suggestions);
 
 private slots:
@@ -60,9 +70,14 @@ private:
     void executeServerCommand(const QString& command, const QString& inputText,
                             std::function<void(CommandResult, const QString&)> callback);
     
+    // Command parsing helpers
+    bool parseCommandWithArgs(const QString& command, QString& baseCommand, QJsonObject& args) const;
+    QString formatServerResponse(const QString& command, const QJsonObject& response) const;
+    
     ServerManager* server;
     QMap<QString, CommandInfo> commands;
     QStringList availableCommands;
+    ExecutionState executionState;
 };
 
 #endif // COMMANDMANAGER_H

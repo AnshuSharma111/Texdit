@@ -18,7 +18,17 @@
 .#*
 *.*#
 core
+
+# Test results and temporary files
+backend/quick_test_results_*.json
+backend/architecture_comparison_*.json
+*.log
 !core/
+
+# Large AI model files (too big for GitHub)
+*.bin
+models/**/pytorch_model.bin
+models/**/model.safetensors
 tags
 .DS_Store
 .directory
